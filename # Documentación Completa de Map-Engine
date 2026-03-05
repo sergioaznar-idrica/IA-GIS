@@ -1,0 +1,1481 @@
+# Documentación Completa de Map-Engine
+
+## Visión General
+
+**map-engine** es un módulo completo de gestión de mapas geográficos construido en TypeScript/React. Proporciona una arquitectura escalable y modular para la integración de mapas interactivos basados en la biblioteca **@goaigua/go-gis**.
+
+### Estructura Principal
+
+```
+map-engine/
+├── core/                    # Lógica empresarial y definiciones de dominio
+├── infra/                   # Implementación de infraestructura
+├── react/                   # Componentes React e integración
+└── index.ts                 # Punto de entrada del módulo
+```
+
+---
+
+## 1. CAPA CORE (Dominio y Puertos)
+
+### 1.1 Domain - Tipos Fundamentales
+
+**Ubicación:** `core/domain/types.ts`
+
+#### Tipos Aliaseados Principales
+
+```typescript
+// Vista y Configuración
+MapView = optionsView                          // Configuración de vista del mapa
+MapState = { loading, ready, error }           // Estado del mapa
+LayerConfig = layerOptions                     // Configuración de capas
+TocConfig = optionsToc                         // Tabla de contenidos
+FolderConfig = folderOptions                   // Configuración de carpetas
+
+// Estilos
+StyleSVGConfig = ISVGIcon                      // Estilos SVG para elementos
+StyleGeojsonConfig = styleGeojson              // Estilos GeoJSON
+StyleGraphicConfig = StyleFromUserGraphic      // Estilos gráficos personalizados
+StyleStrokeConfig = StrokeOptions              // Estilos de líneas
+StyleFillConfig = FillOptions                  // Estilos de relleno
+
+// Datos Geoespaciales
+GeoJSONData = GeoJSON | Record<string, unknown> | unknown[]
+
+// Instancias Nativas
+NativeMapInstance = OlMap | null               // Instancia nativa de mapa (OpenLayers)
+```
+
+#### MapState - Estado del Mapa
+
+```typescript
+type MapState = {
+    loading: boolean;      // Indica si el mapa está en proceso de carga
+    ready: boolean;        // Indica si el mapa está listo para usar
+    error: Error | null;   // Almacena errores que ocurren durante la carga
+};
+```
+
+### 1.2 Domain - Entidades
+
+**Ubicación:** `core/domain/LayerConfig.ts`
+
+#### LayerConfigEntity
+
+Encapsula la configuración de una capa cartográfica.
+
+```typescript
+class LayerConfigEntity {
+    readonly config: LayerConfig;
+    
+    constructor(config: LayerConfig);
+    
+    get id(): string;                    // ID único de la capa
+    get layerType(): string;             // Tipo de capa (WMS, WFS, GeoJSON)
+    get isBaseLayer(): boolean;          // Indica si es capa base
+    
+    validate(): boolean;                 // Valida que id y alias existan
+}
+```
+
+**Responsabilidades:**
+- Encapsular configuración de capas
+- Proporcionar acceso tipado a propiedades
+- Validar la integridad de la configuración
+
+### 1.3 Domain - Clase Abstracta MapGroup
+
+**Ubicación:** `core/domain/MapGroup.ts`
+
+Define el contrato base para gestiónares de grupos de mapas.
+
+```typescript
+abstract class MapGroup {
+    public readonly id: string;
+    
+    // Métodos abstractos que deben implementarse
+    
+    abstract getMap(mapId: string): NativeMapInstance | null;
+    abstract getStaging(mapId: string): NativeStagingInstance | null;
+    abstract getLayers(mapId: string): Map<string, NativeLayerInstance> | null;
+    
+    abstract flyToCenter(mapId: string, center: [number, number], duration?: number): void;
+    abstract setCenter(mapId: string, center: [number, number]): void;
+    abstract unmountMap(mapId: string): void;
+    abstract addNewLayer(mapId: string, layerConfig: LayerConfig): void;
+    
+    abstract setLanguage(language: string): void;
+    abstract getLanguage(): string | null;
+}
+```
+
+**Responsabilidades:**
+- Definir contrato de gestión de mapas
+- Proporcionar operaciones de manipulación de vista (pan, zoom)
+- Gestión de capas dinámicamente
+- Soporte multiidioma
+
+### 1.4 Puertos - Interfaces IMapGroup
+
+**Ubicación:** `core/ports/IMapGroup.ts`
+
+Define el contrato que implementan los gestores de mapas.
+
+```typescript
+export interface IMapGroup {
+    id: string;
+    
+    // Acceso a instancias nativas
+    getMap(mapId: string): NativeMapInstance | null;
+    getStaging(mapId: string): NativeStagingInstance | null;
+    getLayers(mapId: string): Map<string, NativeLayerInstance> | null;
+    
+    // Operaciones de vista
+    flyToCenter(mapId: string, center: [number, number], duration?: number): void;
+    setCenter(mapId: string, center: [number, number]): void;
+    
+    // Gestión del ciclo de vida
+    unmountMap(mapId: string): void;
+    addNewLayer(mapId: string, layerConfig: LayerConfig): void;
+    
+    // Soporte multiidioma
+    setLanguage(language: string): void;
+    getLanguage(): string | null;
+}
+
+// Tipos auxiliares
+type GeocodingHEREConfig = HEREParams;
+type MouseHoverConfig = HoverInteraction;
+type HighlightConfig = {
+    id?: string;
+    enabled?: boolean;
+    style?: styleFromUser;
+};
+```
+
+### 1.5 Puertos - Interfaces de Constructores de Capas
+
+**Ubicación:** `core/ports/ILayerBuilder.ts`
+
+Define el patrón Builder para configurar capas cartográficas.
+
+#### ILayerBuilder (Base)
+
+```typescript
+export interface ILayerBuilder {
+    withId(id: string): this;
+    withAlias(alias: string): this;
+    withUrl(url: string): this;
+    withOpacity(opacity: number): this;
+    withVisibility(visible: boolean): this;
+    withZIndex(zIndex: number): this;
+    withUrlFolder(urlFolder: string): this;
+    build(): LayerConfig;
+}
+```
+
+#### IWMSLayerBuilder
+
+Para capas WMS (Web Map Service):
+
+```typescript
+export interface IWMSLayerBuilder extends ILayerBuilder {
+    withLayerName(layerName: string): this;
+    withEsri(esri: boolean): this;
+    withStyle(style: string): this;
+    withFormat(format: string): this;
+    withTransparent(transparent: boolean): this;
+    build(): LayerConfig;
+}
+```
+
+#### IWFSLayerBuilder
+
+Para capas WFS (Web Feature Service):
+
+```typescript
+export interface IWFSLayerBuilder extends ILayerBuilder {
+    withLayerName(layerName: string): this;
+    withLayerProjection(projection: string): this;
+    withEsri(esri: boolean): this;
+    withStyleSVG(styleSVG: StyleSVGConfig): this;
+    withStyleGeojson(styleGeojson: StyleGeojsonConfig): this;
+    build(): LayerConfig;
+}
+```
+
+#### IGeoJSONLayerBuilder
+
+Para capas GeoJSON:
+
+```typescript
+export interface IGeoJSONLayerBuilder extends ILayerBuilder {
+    withData(data: GeoJSONData): this;
+    withStyleGeojson(styleGeojson: StyleGeojsonConfig): this;
+    withStyleSVG(styleSVG: StyleSVGConfig): this;
+    withDisableImageEffect(disable: boolean): this;
+    build(): LayerConfig;
+}
+```
+
+### 1.6 Puertos - Interface IMapLoader
+
+**Ubicación:** `core/ports/IMapLoader.ts`
+
+Define el contrato para cargar mapas.
+
+```typescript
+export interface LoadMapConfig {
+    environment: string;              // Ej: 'production', 'staging'
+    userToken: string;                // Token de autenticación
+    mapConfig: MapConfig;             // Configuración del mapa
+    useBackendFeatures?: boolean;     // Usar características del backend
+    timeout?: number;                 // Timeout en milisegundos (default: 30000)
+}
+
+export interface IMapLoader {
+    /**
+     * Carga un mapa de forma asincrónica
+     * @param mapId - Identificador único del mapa
+     * @param config - Configuración de carga
+     * @returns Promise con la instancia del mapa
+     */
+    loadMap(mapId: string, config: LoadMapConfig): Promise<NativeMapInstance>;
+    
+    /**
+     * Obtiene un mapa ya cargado
+     * @param mapId - Identificador del mapa
+     * @returns Instancia del mapa o null
+     */
+    getMap(mapId: string): NativeMapInstance | null;
+    
+    /**
+     * Verifica si un mapa está cargándose
+     */
+    isMapLoading(mapId: string): boolean;
+    
+    /**
+     * Verifica si un mapa está listo
+     */
+    isMapReady(mapId: string): boolean;
+    
+    /**
+     * Descarga un mapa y libera recursos
+     */
+    unloadMap(mapId: string): void;
+}
+```
+
+---
+
+## 2. CAPA INFRA (Implementación)
+
+### 2.1 Adaptadores - GoMapGroup
+
+**Ubicación:** `infra/adapters/GoMapGroup.ts`
+
+Implementación concreta de IMapGroup usando la biblioteca @goaigua/go-gis.
+
+```typescript
+class GoMapGroup extends MapGroup implements IMapGroup {
+    protected readonly mapGroup: GoMap;
+    
+    constructor(id: string, mapGroup: GoMap);
+    
+    protected get nativeMap(): GoMap;
+    
+    // Implementación de métodos abstractos
+    
+    getMap(mapId: string): NativeMapInstance | null;
+    getStaging(mapId: string): NativeStagingInstance | null;
+    getLayers(mapId: string): Map<string, GOLayer> | null;
+    
+    flyToCenter(mapId: string, center: [number, number], duration?: number): void;
+    setCenter(mapId: string, center: [number, number]): void;
+    unmountMap(mapId: string): void;
+    
+    addNewLayer(mapId: string, layerConfig: LayerConfig): void;
+    
+    setLanguage(language: string): void;
+    getLanguage(): string | null;
+}
+```
+
+**Responsabilidades:**
+- Adaptar la interfaz genérica IMapGroup a la API específica de GoMap
+- Proporcionar acceso a la instancia nativa del mapa
+- Delegar operaciones a la instancia GoMap subyacente
+
+### 2.2 Servicios - MapLoaderService (Singleton)
+
+**Ubicación:** `infra/services/MapLoaderService.ts`
+
+Servicio de carga de mapas con gestión de ciclo de vida y caché.
+
+#### Estructura Interna
+
+```typescript
+interface MapLoadState {
+    promise: Promise<GoMap>;           // Promise de carga del mapa
+    map: GoMap | null;                 // Instancia del mapa cargado
+    initialized: boolean;              // ¿Está inicializado?
+    ready: boolean;                    // ¿Está listo?
+    readyPromise?: Promise<GoMap>;    // Promise para estado ready
+    readyResolve?: (map: GoMap) => void;
+    timeoutId?: ReturnType<typeof setTimeout> | null;
+    handleMapLoaded?: (event: unknown) => void;
+    configHash?: string;               // Hash para cache invalidation
+}
+
+class MapLoaderService {
+    private static instance: MapLoaderService;
+    private loadingMaps = new Map<string, MapLoadState>();
+    
+    static getInstance(): MapLoaderService;
+}
+```
+
+#### Métodos Principales
+
+```typescript
+// Cargar un mapa
+async loadMap(mapId: string, config: LoadMapConfig): Promise<GoMap>
+// - Verifica si el mapa ya está cargado y devuelve el existente
+// - Genera un hash de configuración para invalidación de caché
+// - Carga el mapa con timeout configurable
+// - Escucha eventos GOMapEvents.MAP_LOADED
+// - Maneja errores con información detallada
+
+// Obtener mapa cargado
+getMap(mapId: string): GoMap | null;
+
+// Verificar estado
+isMapLoading(mapId: string): boolean;
+isMapInitialized(mapId: string): boolean;
+isMapReady(mapId: string): boolean;
+
+// Marcar estado
+setMapInitialized(mapId: string): void;
+
+// Esperar a que el mapa esté listo
+async waitForMapReady(mapId: string): Promise<GoMap>;
+
+// Obtener o cargar
+async getMapOrLoad(mapId: string, config: LoadMapConfig): Promise<GoMap>;
+
+// Descargar mapa
+unloadMap(mapId: string): void;
+// - Limpia timeouts
+// - Desuscribe de eventos
+// - Desmonta el mapa
+
+// Limpiar todos los mapas
+cleanup(): void;
+```
+
+#### Características Clave
+
+1. **Singleton:** Una única instancia en toda la aplicación
+2. **Cache de Mapas:** Evita cargas duplicadas de la misma configuración
+3. **Manejo de Timeouts:** Timeout configurable para detección de fallas
+4. **Generación de Hash:** Invalida caché si la configuración cambia
+5. **Manejo de Estado Ready:** Diferencia entre carga completada y listo para usar
+6. **Event Listeners:** Escucha GOMapEvents.MAP_LOADED para estado ready
+7. **Limpieza de Recursos:** Gestiona timeouts y event listeners
+
+#### Ejemplo de Uso
+
+```typescript
+const service = MapLoaderService.getInstance();
+
+const map = await service.loadMap('my-map', {
+    environment: 'production',
+    userToken: 'token123',
+    mapConfig: { /* config */ },
+    timeout: 30000
+});
+
+// Esperar a que esté completamente listo
+const readyMap = await service.waitForMapReady('my-map');
+```
+
+### 2.3 Configuración - LayerConfigBuilder
+
+**Ubicación:** `infra/config/LayerConfigBuilder.ts`
+
+Implementación del patrón Builder para construir configuraciones de capas.
+
+#### Estructura
+
+```typescript
+class LayerConfigError extends Error {
+    constructor(
+        message: string,
+        public readonly errors: string[],
+        public readonly config: Partial<LayerConfig>
+    );
+}
+
+class BaseLayerBuilder {
+    protected config: Partial<LayerConfig> = {
+        isBaseLayer: false,
+        opacity: 1,
+        defaultVisibility: true,
+        zIndex: 0
+    };
+    
+    withId(id: string): this;
+    withAlias(alias: string): this;
+    withOpacity(opacity: number): this;
+    withVisibility(visible: boolean): this;
+    withZIndex(zIndex: number): this;
+    withUrlFolder(urlFolder: string): this;
+}
+```
+
+#### Constructores Específicos
+
+```typescript
+class WMSLayerBuilder extends BaseLayerBuilder implements IWMSLayerBuilder {
+    constructor();  // Inicializa con layerType: GOLayerType.GO_WMS_LAYER
+    
+    withUrl(url: string): this;
+    withLayerName(layerName: string): this;
+    withEsri(esri: boolean): this;
+    withStyle(style: string): this;
+    withFormat(format: string): this;
+    withTransparent(transparent: boolean): this;
+    build(): LayerConfig;
+}
+
+class WFSLayerBuilder extends BaseLayerBuilder implements IWFSLayerBuilder {
+    withUrl(url: string): this;
+    withLayerName(layerName: string): this;
+    withLayerProjection(projection: string): this;
+    withEsri(esri: boolean): this;
+    withStyleSVG(styleSVG: StyleSVGConfig): this;
+    withStyleGeojson(styleGeojson: StyleGeojsonConfig): this;
+    build(): LayerConfig;
+}
+
+class GeoJSONLayerBuilder extends BaseLayerBuilder implements IGeoJSONLayerBuilder {
+    withUrl(url: string): this;
+    withData(data: GeoJSONData): this;
+    withStyleGeojson(styleGeojson: StyleGeojsonConfig): this;
+    withStyleSVG(styleSVG: StyleSVGConfig): this;
+    withDisableImageEffect(disable: boolean): this;
+    build(): LayerConfig;
+}
+```
+
+#### Ejemplo de Uso
+
+```typescript
+const wmsLayer = new WMSLayerBuilder()
+    .withId('layer-1')
+    .withAlias('My WMS Layer')
+    .withUrl('https://wms.example.com')
+    .withLayerName('layer_name')
+    .withFormat('image/png')
+    .withOpacity(0.7)
+    .build();
+
+const geoJsonLayer = new GeoJSONLayerBuilder()
+    .withId('geojson-layer')
+    .withAlias('My GeoJSON')
+    .withData({
+        type: 'FeatureCollection',
+        features: []
+    })
+    .withStyleGeojson({
+        /* estilos */
+    })
+    .build();
+```
+
+### 2.4 Presets de Configuración
+
+**Ubicación:** `infra/config/presets/`
+
+Contiene presets predefinidos de capas y mapas:
+
+- **baseLayerPresets.ts**: Capas base predefinidas (OSM, Google Maps, etc.)
+- **layerPresets.ts**: Capas comunes (administrativas, de datos, etc.)
+- **mapPresets.ts**: Configuraciones de mapa completas
+- **Funciones útiles:**
+  - `getBaseLayerTranslations()`: Obtiene traducciones de capas base
+  - `getBaseLayers()`: Obtiene capas base disponibles
+  - `createTocWithFolders()`: Crea tabla de contenidos con carpetas
+  - `createFolderConfig()`: Crea configuración de carpeta
+
+---
+
+## 3. CAPA REACT (Interfaz de Usuario)
+
+### 3.1 Componentes
+
+#### Map Component
+
+**Ubicación:** `react/components/Map/index.tsx`
+
+Componente principal para renderizar un mapa.
+
+```typescript
+export interface MapProps {
+    mapId: string;                                    // ID único del mapa
+    config: MapConfig;                               // Configuración
+    environment: string;                             // Entorno (prod/staging)
+    token: string;                                   // Token de auth
+    layers?: LayerConfig[];                         // Capas iniciales
+    autoLoad?: boolean;                             // Cargar automáticamente
+    containerId?: string;                           // ID contenedor DOM
+    className?: string;                             // Clases CSS
+    loadingComponent?: ReactNode;                  // Componente de carga
+    errorComponent?: ReactNode | ((error: Error) => ReactNode);  // Componente de error
+    onMapReady?: (map: MapGroup) => void;          // Callback cuando esté listo
+    onMapError?: (error: Error) => void;           // Callback de error
+}
+
+export const Map = ({ /* props */ }): JSX.Element;
+```
+
+**Características:**
+- Renderiza automáticamente un componente de carga mientras el mapa se está cargando
+- Renderiza componente de error personalizable si falla
+- Integra automáticamente con hooks de mapa
+- Soporta propiedades configurables de errorComponent y loadingComponent
+
+#### MapContainer Component
+
+**Ubicación:** `react/components/MapContainer/index.tsx`
+
+Contenedor que proporciona proveedores contextuales necesarios.
+
+```typescript
+export interface MapContainerProps {
+    children: ReactNode;
+    errorBoundary?: boolean;                        // Habilitar error boundary
+    errorFallback?: ReactNode | ((error: Error) => ReactNode);  // Fallback de error
+}
+
+export const MapContainer = ({
+    children,
+    errorBoundary = true,
+    errorFallback
+}: MapContainerProps): JSX.Element;
+```
+
+**Responsabilidades:**
+- Proporciona MapProvider (contexto de estado de mapas)
+- Proporciona GOMapRootProvider (registro de mapas nativos)
+- Envuelve con MapErrorBoundary para manejo de errores
+
+#### MapErrorBoundary Component
+
+**Ubicación:** `react/components/MapErrorBoundary/index.tsx`
+
+Error Boundary de React para componentes de mapa.
+
+```typescript
+export interface MapErrorBoundaryProps {
+    children: ReactNode;
+    fallback?: ReactNode | ((error: Error, resetError: () => void) => ReactNode);
+    onError?: (error: Error, errorInfo: ErrorInfo) => void;
+    mapId?: string;
+}
+
+export class MapErrorBoundary extends Component<
+    MapErrorBoundaryProps,
+    MapErrorBoundaryState
+> {
+    static getDerivedStateFromError(error: Error): MapErrorBoundaryState;
+    componentDidCatch(error: Error, errorInfo: ErrorInfo): void;
+    resetError = (): void;
+    render(): ReactNode;
+}
+```
+
+**Características:**
+- Captura errores de componentes hijos
+- Proporciona información detallada de errores en desarrollo
+- Permite reintentar con resetError()
+- Loguea errores con información de componentes
+
+### 3.2 Contextos
+
+#### GOMapRootProvider Context
+
+**Ubicación:** `react/context/GOMapsRootProvider.tsx`
+
+Registro global de instancias nativas de mapas.
+
+```typescript
+interface GOMapRegistryContextValue {
+    registerMapGroup(mapId: string, api: MapGroup): void;
+    getMapGroup(mapId: string): MapGroup | undefined;
+    unregisterMapGroup(mapId: string): void;
+}
+
+const GOMapRootProvider = ({ children }: GOMapRootProviderProps);
+const useGOMapRegistry = (): GOMapRegistryContextValue;
+```
+
+**Responsabilidades:**
+- Mantener registro de instancias nativas GoMap
+- Permitir comunicación entre múltiples mapas
+- Facilitar acceso global a instancias
+
+#### MapContext
+
+**Ubicación:** `react/context/MapContext.tsx`
+
+Contexto para gestión de estado de mapas y registro de instancias.
+
+```typescript
+interface MapContextValue {
+    registerMap(mapId: string, map: MapGroup): void;
+    getMap(mapId: string): MapGroup | undefined;
+    unregisterMap(mapId: string): void;
+    getAllMaps(): MapsRegistry;
+    setMapState(mapId: string, state: Partial<MapState>): void;
+    getMapState(mapId: string): MapState | undefined;
+}
+
+export function MapProvider({ children }: MapProviderProps);
+export function useMapContext(): MapContextValue;
+```
+
+**Responsabilidades:**
+- Mantener registro de todas las instancias de mapas
+- Gestionar estado (loading, ready, error) de cada mapa
+- Permitir actualización y consulta de estado
+- Proporcionar contexto a todos los hooks de mapa
+
+### 3.3 Hooks Principales
+
+#### useMap Hook
+
+**Ubicación:** `react/hooks/useMap.ts`
+
+Hook principal para gestión de ciclo de vida del mapa.
+
+```typescript
+export interface UseMapOptions {
+    config: MapConfig;
+    environment: string;
+    token: string;
+    autoLoad?: boolean;                       // default: false
+    useBackendFeatures?: boolean;            // default: true
+    timeout?: number;                        // default: 30000
+    layerTimeout?: number;                   // default: 30000
+}
+
+export interface UseMapReturn {
+    map: MapGroup | null;
+    mapId: string;
+    isReady: boolean;
+    isLoading: boolean;
+    error: Error | null;
+    
+    waitForReady(): Promise<MapGroup>;
+    waitForLayer(layerId: string): Promise<NativeLayer>;
+    getNativeMap(): NativeMap | null;
+    getStaging(): NativeStagingMap | null;
+    getLayers(): Map<string, NativeLayer> | null;
+}
+
+export const useMap = (
+    mapId: string,
+    options?: UseMapOptions
+): UseMapReturn;
+```
+
+**Flujo de Funcionamiento:**
+
+1. **Inicialización:**
+   - Verifica si el mapa ya existe en contexto (reusa instancia)
+   - Si autoLoad es true, inicia la carga automáticamente
+
+2. **Carga:**
+   - Usa MapLoaderService.loadMap()
+   - Espera una Promise con timeout configurable
+   - Registra el mapa en el contexto y registro nativo
+
+3. **Estado Ready:**
+   - Escucha eventos GOMapEvents.MAP_LOADED
+   - Actualiza estado ready cuando sea apropiado
+   - Resuelve waitForReady() cuando esté listo
+
+4. **Limpieza:**
+   - Desmonta el mapa en cleanup
+   - Cancela operaciones pendientes con AbortController
+   - Desuscribe de eventos
+
+#### useMapView Hook
+
+```typescript
+export interface UseMapViewReturn {
+    zoom: number;
+    center: [number, number];
+    setZoom(zoom: number): void;
+    setCenter(center: [number, number]): void;
+    setView(center: [number, number], zoom: number): void;
+    fitBounds(bounds: BoundsConfig): void;
+    flyToCenter(center: [number, number], duration?: number): void;
+}
+
+export const useMapView = (mapId: string): UseMapViewReturn;
+```
+
+Gestiona operaciones de vista (zoom, pan, bounds).
+
+#### useMapLayers Hook
+
+```typescript
+export interface UseMapLayersReturn {
+    layers: Map<string, NativeLayer> | null;
+    addLayer(layerConfig: LayerConfig): void;
+    removeLayer(layerId: string): void;
+    updateLayer(layerId: string, config: Partial<LayerConfig>): void;
+    getLayer(layerId: string): NativeLayer | null;
+    setLayerVisibility(layerId: string, visible: boolean): void;
+    setLayerOpacity(layerId: string, opacity: number): void;
+    setLayerZIndex(layerId: string, zIndex: number): void;
+}
+
+export const useMapLayers = (mapId: string): UseMapLayersReturn;
+```
+
+Gestiona capas (agregar, remover, actualizar propiedades).
+
+#### useMapFeatures Hook
+
+```typescript
+export interface UseMapFeaturesReturn {
+    selectedFeatures: Array<{
+        id: string;
+        geometry: unknown;
+        properties: Record<string, unknown>;
+    }>;
+    selectFeature(featureId: string): void;
+    deselectFeature(featureId: string): void;
+    clearSelection(): void;
+    getFeatureById(featureId: string): unknown;
+}
+
+export const useMapFeatures = (mapId: string): UseMapFeaturesReturn;
+```
+
+Gestiona selección e interacción con características.
+
+#### useMapFilters Hook
+
+```typescript
+export interface UseMapFiltersReturn {
+    filters: Record<string, unknown>;
+    setFilter(key: string, value: unknown): void;
+    clearFilters(): void;
+    applyFilters(): void;
+}
+
+export const useMapFilters = (mapId: string): UseMapFiltersReturn;
+```
+
+Gestiona filtrado de características.
+
+#### useMapFeaturesLoader Hook
+
+```typescript
+export interface UseMapFeaturesLoaderOptions {
+    autoLoad?: boolean;
+    layerId?: string;
+}
+
+export interface UseMapFeaturesLoaderReturn {
+    features: unknown[];
+    isLoading: boolean;
+    error: Error | null;
+    loadFeatures(layerId: string): Promise<void>;
+}
+
+export const useMapFeaturesLoader = (
+    mapId: string,
+    options?: UseMapFeaturesLoaderOptions
+): UseMapFeaturesLoaderReturn;
+```
+
+Carga características de capas.
+
+#### useMapTheme Hook
+
+```typescript
+export interface UseMapThemeOptions {
+    defaultTheme?: 'light' | 'dark';
+}
+
+export interface UseMapThemeReturn {
+    currentTheme: 'light' | 'dark';
+    setTheme(theme: 'light' | 'dark'): void;
+}
+
+export const useMapTheme = (
+    mapId: string,
+    options?: UseMapThemeOptions
+): UseMapThemeReturn;
+```
+
+Gestiona tema del mapa.
+
+#### useMapInteractions Hook
+
+```typescript
+export interface HoverInteractionConfig {
+    enabled: boolean;
+    layerId: string;
+    highlightStyle?: Record<string, unknown>;
+}
+
+export interface ClickInteractionConfig {
+    enabled: boolean;
+    layerId: string;
+    callback: (feature: unknown) => void;
+}
+
+export interface GeocodingConfig {
+    enabled: boolean;
+    provider: 'HERE' | 'OSM';
+    apiKey?: string;
+}
+
+export interface UseMapInteractionsOptions {
+    hover?: HoverInteractionConfig;
+    click?: ClickInteractionConfig;
+    geocoding?: GeocodingConfig;
+}
+
+export interface UseMapInteractionsReturn {
+    enableHover(config: HoverInteractionConfig): void;
+    disableHover(): void;
+    enableClick(config: ClickInteractionConfig): void;
+    disableClick(): void;
+    search(query: string): Promise<unknown[]>;
+}
+
+export const useMapInteractions = (
+    mapId: string,
+    options?: UseMapInteractionsOptions
+): UseMapInteractionsReturn;
+```
+
+Gestiona interacciones: hover, click, geocoding.
+
+#### useMapInteractionsAccess Hook
+
+```typescript
+export const useMapInteractionsAccess = (mapId: string);
+```
+
+Acceso a configuración de interacciones existentes.
+
+#### useMapLanguage Hook
+
+```typescript
+export interface UseMapLanguageOptions {
+    defaultLanguage?: string;
+}
+
+export interface UseMapLanguageReturn {
+    currentLanguage: string;
+    setLanguage(language: string): void;
+    getTocTranslations(language: string): Record<string, string>;
+}
+
+export const useMapLanguage = (
+    mapId: string,
+    options?: UseMapLanguageOptions
+): UseMapLanguageReturn;
+```
+
+Gestiona idioma y traducciones.
+
+#### useMapLayerAnnotations Hook
+
+```typescript
+export interface AnnotationConfig {
+    id: string;
+    layerId: string;
+    type: 'marker' | 'label' | 'shape';
+    geometry: unknown;
+    style?: Record<string, unknown>;
+}
+
+export interface UseMapLayerAnnotationsOptions {
+    layerId?: string;
+}
+
+export interface UseMapLayerAnnotationsReturn {
+    annotations: AnnotationConfig[];
+    addAnnotation(config: AnnotationConfig): void;
+    removeAnnotation(annotationId: string): void;
+    updateAnnotation(annotationId: string, config: Partial<AnnotationConfig>): void;
+}
+
+export const useMapLayerAnnotations = (
+    mapId: string,
+    options?: UseMapLayerAnnotationsOptions
+): UseMapLayerAnnotationsReturn;
+```
+
+Gestiona anotaciones sobre capas.
+
+#### useMapUI Hook
+
+```typescript
+export interface PanelConfig {
+    id: string;
+    title: string;
+    position: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right';
+    visible: boolean;
+    content?: React.ReactNode;
+}
+
+export interface UseMapUIOptions {
+    defaultPanels?: PanelConfig[];
+}
+
+export interface UseMapUIReturn {
+    panels: PanelConfig[];
+    addPanel(panel: PanelConfig): void;
+    removePanel(panelId: string): void;
+    updatePanel(panelId: string, config: Partial<PanelConfig>): void;
+    showPanel(panelId: string): void;
+    hidePanel(panelId: string): void;
+}
+
+export const useMapUI = (
+    mapId: string,
+    options?: UseMapUIOptions
+): UseMapUIReturn;
+```
+
+Gestiona paneles UI del mapa.
+
+#### useMapFeatureClick Hook
+
+```typescript
+export interface HighlightConfig {
+    id?: string;
+    enabled?: boolean;
+    style?: Record<string, unknown>;
+}
+
+export interface UseMapFeatureClickOptions {
+    autoHighlight?: boolean;
+    highlightStyle?: HighlightConfig;
+}
+
+export interface UseMapFeatureClickReturn {
+    selectedFeature: unknown | null;
+    selectFeature(feature: unknown): void;
+    deselectFeature(): void;
+    getSelectedFeatureProperties(): Record<string, unknown> | null;
+}
+
+export const useMapFeatureClick = (
+    mapId: string,
+    options?: UseMapFeatureClickOptions
+): UseMapFeatureClickReturn;
+```
+
+Gestiona clicks en características.
+
+#### useMapEvents Hook
+
+```typescript
+export const useMapEvents = (mapId: string);
+```
+
+Proporciona acceso a eventos del mapa.
+
+#### useMapErrorHandler Hook
+
+```typescript
+export const useMapErrorHandler = (mapId: string);
+```
+
+Proporciona utilidades para manejo de errores.
+
+#### useOnLayerReady Hook
+
+```typescript
+export interface UseOnLayerReadyOptions {
+    layerId: string;
+    timeout?: number;
+}
+
+export interface UseOnLayerReadyReturn {
+    isReady: boolean;
+    waitForLayer(): Promise<void>;
+}
+
+export const useOnLayerReady = (
+    mapId: string,
+    options: UseOnLayerReadyOptions
+): UseOnLayerReadyReturn;
+```
+
+Espera a que una capa esté lista.
+
+### 3.4 Tipos Nativos
+
+**Ubicación:** `react/types/native.ts`
+
+Tipos TypeScript para instancias nativas de @goaigua/go-gis:
+
+```typescript
+type NativeMap = OlMap | null;           // OpenLayers Map
+type NativeLayer = GOLayer | null;        // GOLayer
+type NativeStagingMap = GOStagingMap | null;  // Staging map
+```
+
+### 3.5 Utilidades
+
+#### devLogger
+
+**Ubicación:** `react/utils/devLogger.ts`
+
+Sistema de logging con soporte para desarrollo/producción.
+
+```typescript
+const logger = {
+    isDev(): boolean;                     // ¿Estamos en desarrollo?
+    
+    log(message: string): void;
+    warn(message: string, data?: unknown): void;
+    error(message: string): void;
+    
+    errorDetailed(
+        mapId: string,
+        error: Error,
+        metadata?: {
+            componentStack?: string;
+            errorBoundary?: boolean;
+        }
+    ): void;
+};
+```
+
+---
+
+## 4. PATRONES Y ARQUITECTURA
+
+### 4.1 Arquitectura Hexagonal (Ports & Adapters)
+
+```
+┌─────────────────────────────────────────┐
+│       React UI Layer                    │
+│  ┌──────────────────────────────────┐   │
+│  │  Components & Hooks              │   │
+│  │  - Map, MapContainer, useMap     │   │
+│  │  - Context Providers             │   │
+│  └──────────────────────────────────┘   │
+└──────────────┬──────────────────────────┘
+               │
+┌──────────────▼──────────────────────────┐
+│       Domain Layer (Core)               │
+│  ┌──────────────────────────────────┐   │
+│  │  Abstractions & Domain Logic     │   │
+│  │  - IMapGroup, IMapLoader         │   │
+│  │  - ILayerBuilder, MapGroup       │   │
+│  │  - Types & Entities              │   │
+│  └──────────────────────────────────┘   │
+└──────────────┬──────────────────────────┘
+               │
+┌──────────────▼──────────────────────────┐
+│       Infrastructure Layer (Infra)      │
+│  ┌──────────────────────────────────┐   │
+│  │  Implementations                 │   │
+│  │  - GoMapGroup (IMapGroup impl)   │   │
+│  │  - MapLoaderService              │   │
+│  │  - LayerConfigBuilder            │   │
+│  │  - Configuration & Presets       │   │
+│  └──────────────────────────────────┘   │
+└──────────────┬──────────────────────────┘
+               │
+┌──────────────▼──────────────────────────┐
+│    External Library: @goaigua/go-gis   │
+│    - GoMap, GOLayer, GoMapLoader       │
+└─────────────────────────────────────────┘
+```
+
+### 4.2 Patrón Builder
+
+```typescript
+// Construcción fluida de configuraciones complejas
+const layer = new WMSLayerBuilder()
+    .withId('id')
+    .withAlias('alias')
+    .withUrl('url')
+    .withLayerName('name')
+    .build();
+```
+
+### 4.3 Patrón Singleton
+
+```typescript
+// Una única instancia del servicio de carga
+const service = MapLoaderService.getInstance();
+```
+
+### 4.4 Patrón Provider-Consumer (React Context)
+
+```typescript
+// Proveedores en nivel superior
+<MapContainer>
+    <MapProvider>
+        <GOMapRootProvider>
+            {/* Componentes pueden consumir contexto */}
+        </GOMapRootProvider>
+    </MapProvider>
+</MapContainer>
+
+// Consumidores en cualquier nivel
+const { map, isReady } = useMap(mapId);
+const registry = useGOMapRegistry();
+```
+
+### 4.5 Patrón Error Boundary (React)
+
+```typescript
+// Captura de errores en la jerarquía de componentes
+<MapErrorBoundary fallback={<ErrorUI />}>
+    <MapContainer>
+        <App />
+    </MapContainer>
+</MapErrorBoundary>
+```
+
+### 4.6 Patrón Observer (Event-driven)
+
+```typescript
+// MapLoaderService escucha eventos de GOMapEvents
+MapEventManager.events.on(GOMapEvents.MAP_LOADED, handleMapLoaded);
+```
+
+---
+
+## 5. FLUJOS DE USO COMÚNES
+
+### 5.1 Inicializar un Mapa Simple
+
+```typescript
+import { Map, MapContainer } from '@map-engine/react';
+
+function App() {
+    return (
+        <MapContainer errorBoundary>
+            <Map
+                mapId="my-map"
+                config={{
+                    // Tu configuración
+                }}
+                environment="production"
+                token="user-token"
+                autoLoad={true}
+                onMapReady={(map) => console.log('Map ready!', map)}
+                onMapError={(error) => console.error('Map error:', error)}
+            />
+        </MapContainer>
+    );
+}
+```
+
+### 5.2 Agregar Capas Dinámicamente
+
+```typescript
+import { useMap, useMapLayers } from '@map-engine/react/hooks';
+
+function MapComponent({ mapId }: { mapId: string }) {
+    const { map } = useMap(mapId);
+    const { addLayer } = useMapLayers(mapId);
+    
+    const handleAddWMS = () => {
+        addLayer({
+            id: 'new-wms',
+            alias: 'New WMS Layer',
+            layerType: 'WMS',
+            url: 'https://...',
+            layerName: 'layer_name'
+        });
+    };
+    
+    return (
+        <button onClick={handleAddWMS}>Add WMS Layer</button>
+    );
+}
+```
+
+### 5.3 Interactuar con Capas
+
+```typescript
+function MapInteractions({ mapId }: { mapId: string }) {
+    const { layers, setLayerVisibility, setLayerOpacity } = useMapLayers(mapId);
+    const { enableHover } = useMapInteractions(mapId);
+    
+    useEffect(() => {
+        enableHover({
+            enabled: true,
+            layerId: 'my-layer',
+            highlightStyle: { color: 'red' }
+        });
+    }, []);
+    
+    return (
+        <div>
+            <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.1"
+                onChange={(e) => setLayerOpacity('my-layer', parseFloat(e.target.value))}
+            />
+        </div>
+    );
+}
+```
+
+### 5.4 Manejar Errores
+
+```typescript
+<MapErrorBoundary
+    fallback={(error, reset) => (
+        <div>
+            <p>Error: {error.message}</p>
+            <button onClick={reset}>Reintentar</button>
+        </div>
+    )}
+>
+    <MapContainer>
+        <Map {...props} />
+    </MapContainer>
+</MapErrorBoundary>
+```
+
+### 5.5 Manejo de Múltiples Mapas
+
+```typescript
+function MultiMapContainer() {
+    return (
+        <MapContainer>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
+                <Map
+                    mapId="map-1"
+                    config={config1}
+                    environment="production"
+                    token="token"
+                    autoLoad
+                />
+                <Map
+                    mapId="map-2"
+                    config={config2}
+                    environment="production"
+                    token="token"
+                    autoLoad
+                />
+            </div>
+        </MapContainer>
+    );
+}
+```
+
+---
+
+## 6. MEJORES PRÁCTICAS
+
+### 6.1 Configuración de Entrada
+
+✅ **Hacer:**
+- Pasar `mapId` único para cada instancia
+- Proporcionar configuración válida y completa
+- Usar `autoLoad={true}` solo cuando sea necesario
+- Manejar estados loading y error
+
+❌ **No Hacer:**
+- Cambiar `mapId` después de la creación
+- Pasar configuraciones nulas o indefinidas
+- Ignorar errores de carga
+- Crear múltiples instancias con el mismo `mapId`
+
+### 6.2 Gestión de Memoria
+
+✅ **Hacer:**
+- Limpiar leyentes de eventos en cleanup
+- Desuscribirse de observables
+- Desmontar mapas cuando sea necesario
+- Usar AbortController para operaciones
+
+❌ **No Hacer:**
+- Crear instancias de MapLoaderService múltiples veces
+- Mantener referencias a mapas desactualizadas
+- Dejar listeners colgando
+- Ignorar timeouts
+
+### 6.3 Error Handling
+
+✅ **Hacer:**
+- Usar MapErrorBoundary para componentes mapa
+- Proporcionar fallbacks en errorComponent
+- Loguear errores con contexto
+- Permitir reintentos
+
+❌ **No Hacer:**
+- Ignorar errores silenciosamente
+- Mostrar errores raw al usuario
+- No diferenciar tipos de error
+- Dejar operaciones en estado indeterminado
+
+### 6.4 Performance
+
+✅ **Hacer:**
+- Usar lazy loading para mapas
+- Memoizar configuraciones complejas
+- Cachear resultados de consultas
+- Usar debouncing en eventos frecuentes
+
+❌ **No Hacer:**
+- Recrear componentes innecesariamente
+- Cargar todas las capas simultáneamente
+- Hacer queries sin filtrar
+- Actualizar estado en loops
+
+### 6.5 Tipado TypeScript
+
+✅ **Hacer:**
+- Importar tipos desde @map-engine
+- Usar interfaces específicas para configs
+- Tipar callbacks y handlers
+- Ser explícito con tipos genéricos
+
+❌ **No Hacer:**
+- Usar `any` sin razón
+- Tipos incorrectos para callbacks
+- Omitir tipos en interfaces públicas
+- Importar tipos de external sin alias
+
+---
+
+## 7. CASOS DE ERROR COMUNES
+
+### Error: "Map ${mapId} is not loading"
+
+**Causa:** Intentar esperar a mapa que no se está cargando
+
+**Solución:**
+```typescript
+// ✅ Correcto
+const { map, waitForReady } = useMap(mapId, { autoLoad: true });
+await waitForReady();
+
+// ❌ Incorrecto
+await mapLoaderService.waitForMapReady('non-existent');
+```
+
+### Error: "useGOMapRegistry must be used within GOMapRootProvider"
+
+**Causa:** Usar hook fuera del proveedor
+
+**Solución:**
+```typescript
+// ✅ Correcto: Dentro de MapContainer
+<MapContainer>
+    <ComponentThatUsesRegistry />
+</MapContainer>
+
+// ❌ Incorrecto: Fuera de MapContainer
+<ComponentThatUsesRegistry />
+```
+
+### Error: "GoMapLoader.loadGoMap returned null"
+
+**Causa:** Problemas con configuración o red
+
+**Solución:**
+```typescript
+// Verifique:
+// 1. environment debe ser válido
+// 2. userToken no debe estar vacío
+// 3. mapConfig debe ser completo
+// 4. Revise consola del navegador para errores 404/500
+
+// Agregue timeout y validación
+const map = await useMap(mapId, {
+    timeout: 60000,  // Aumentar si es lento
+    ...
+});
+```
+
+---
+
+## 8. EXPANSIÓN FUTURA
+
+Puntos potenciales de extensión:
+
+1. **Nuevos Adaptadores:** Integración con otras librerías (Leaflet, Mapbox)
+2. **Plug-ins:** Sistema modular de características adicionales
+3. **Análisis:** Integración con herramientas de análisis geoespacial
+4. **Colaboración:** Soporte para mapas colaborativos en tiempo real
+5. **Persistencia:** Guardar y cargar estados de mapas
+6. **Componentes Avanzados:** Widgets especializados (heatmaps, clustering)
+7. **Optimización:** Virtualización de capas grandes
+8. **Tests:** Suite completa de pruebas unitarias e integración
+
+---
+
+## 9. EXPORTACIONES PÚBLICAS
+
+### Desde `map-engine/index.ts`
+
+```typescript
+export * from "./core";      // Dominio y puertos
+export * from "./react";     // Componentes y hooks
+export * from "./infra";     // Servicios y configuración
+```
+
+### Acceso a Componentes
+
+```typescript
+// Componentes
+import { Map, MapContainer, MapErrorBoundary } from '@map-engine/react/components';
+
+// Contextos
+import { MapProvider, GOMapRootProvider } from '@map-engine/react/context';
+
+// Hooks
+import { 
+    useMap, 
+    useMapLayers, 
+    useMapFeatures,
+    // ... más hooks
+} from '@map-engine/react/hooks';
+
+// Servicios
+import { mapLoaderService } from '@map-engine/infra/services';
+
+// Configuración
+import { LayerConfigBuilder } from '@map-engine/infra/config';
+```
+
+---
+
+## 10. CONCLUSIÓN
+
+**map-engine** es una arquitectura robusta y escalable para gestión de mapas cartográficos. Su diseño modular permite fácil extensión, mantenimiento y testing. La separación clara entre dominio, infraestructura e interfaz facilita la evolución del código manteniendo compatibilidad hacia atrás.
+
+**Puntos Clave:**
+- ✅ Arquitectura hexagonal con puertos y adaptadores
+- ✅ Patrón singleton para servicios compartidos
+- ✅ Provider pattern de React para estado global
+- ✅ Error boundaries para manejo de errores
+- ✅ Hooks personalizados para todas las operaciones del mapa
+- ✅ TypeScript typesafety en toda la codebase
+- ✅ Presets y builders para configuración simplificada
