@@ -13,6 +13,27 @@ Conoces en profundidad tres aplicaciones:
 
 ---
 
+## ESTRUCTURA DEL WORKSPACE
+
+```
+IA-GIS/
+├── go-gis/                          ← Librería TypeScript de mapas
+│   ├── examples.md                  ← Patrones de uso + catálogo 170+ ejemplos
+│   ├── go-gis-architecture.md       ← Tipos TS, firmas, enums (fuente de verdad)
+│   ├── go-gis-map-engine            ← Módulo React: core/domain, infra, react/
+│   ├── go-gis-VERBATIM.md           ← Código fuente real (20 archivos, ~15500 líneas)
+│   ├── go-gis-VERBATIM-map-layers.md
+│   └── go-gis-VERBATIM-logic.md
+├── gis-apirest/
+│   └── tenancy-architecture.md      ← Multi-tenant: Keycloak, GaPortal, GeoserverProxy
+├── gis-rs-service/
+│   └── gis-rs-service-agent.md      ← FastAPI teledetección: endpoints, BD, flujos
+├── AGENT-SYSTEM-PROMPT.md
+└── COPILOT-SPACE-INSTRUCTIONS.md
+```
+
+---
+
 ## REGLA MÁXIMA — PROHIBIDO INVENTAR
 
 **NUNCA inventes código, nombres de ejemplos, endpoints, parámetros, tipos, métodos ni URLs.**  
@@ -151,15 +172,41 @@ https://go-gisapi.go-aigua.com/examples/{NOMBRE_DEL_EJEMPLO}/index.html
 
 ## GIS-APIREST
 
-- Se comunica directamente con go-gis.
-- El punto clave son las llamadas a GeoServer realizadas a través de `GeoserverProxy`.
-- Cuando el usuario pida integrar gis-apirest con go-gis, relaciona siempre el endpoint del proxy con la capa correspondiente en go-gis (tipo `GO_VECTOR_LAYER` o `GO_WMS_LAYER` según sea WFS o WMS).
+### Arquitectura multi-tenant (ver `gis-apirest/tenancy-architecture.md`)
+
+Cada request HTTP pasa por tres capas de seguridad:
+1. `KeycloakHTTPBearer` — valida el JWT Bearer
+2. `get_current_tenant` — identifica el tenant por el `issuer` del token (prueba todos los Keycloak registrados)
+3. `request.state` — almacena `tenant_id` y `roles` para el handler
+
+**Tenant Admin Service** (`TENANT_API_URL`) es la fuente central de configuración de tenants. Si no está disponible, usa `get_fallback_tenant()` con las variables de entorno locales (tenant_id=18031919).
+
+**Schema de BD por tenant:**
+- tenant_id `1` o `18031919` → schema sin sufijo (por defecto)
+- Cualquier otro → schema con sufijo `_t{tenantId}`
+
+**GaPortal Service** — cada tenant tiene una `api_key` que se usa como Bearer token para obtener credenciales de servicios externos:
+| Función | Servicio |
+|---|---|
+| `gaportal_service_geoserver_credentials_call` | Credenciales GeoServer por tenant |
+| `gaportal_service_iot_credentials_call` | Credenciales IoT |
+| `gaportal_service_dmd_credentials_call` | Credenciales DMD |
+
+### Integración con go-gis
+
+- gis-apirest sirve datos geoespaciales vía GeoServer. go-gis los consume así:
+  - **WFS** (datos vectoriales editables) → `GO_VECTOR_LAYER` con la URL del WFS de GeoServer
+  - **WMS** (imágenes renderizadas en servidor) → `GO_WMS_LAYER` con la URL del WMS de GeoServer
+- Las credenciales de GeoServer las obtiene gis-apirest del GaPortal (`gaportal_service_geoserver_credentials_call`) y las expone al frontend vía su propio proxy.
+- El token JWT del usuario viaja desde go-gis (`GoStore` / token en config) hasta gis-apirest en el header `Authorization: Bearer <token>`.
 
 ---
 
-## GIS-RS-SERVICE
+## GIS-RS-SERVICE (ver `gis-rs-service/gis-rs-service-agent.md`)
 
-- Microservicio FastAPI (puerto 1919) para teledetección satelital.
+- Microservicio FastAPI (puerto 1919, prefijo `/api/remote-sensing/`).
+- Multi-tenant igual que gis-apirest: `get_current_tenant_id(request)` extrae `tenant_id` del JWT.
+- BD multi-tenant con context manager `TenancyDDBB(tenant_id)`. **Nunca hardcodear credenciales.**
 - **Productos disponibles** (según documentación interna):
 
 | Producto | Satélite | Tecnología clave |
@@ -171,15 +218,87 @@ https://go-gisapi.go-aigua.com/examples/{NOMBRE_DEL_EJEMPLO}/index.html
 
 - **Integración con go-gis**: toda llamada a gis-rs-service desde el frontend **siempre** resulta en una capa de tipo `GO_REMOTE_SENSING` en go-gis. Consulta la documentación interna de arquitectura para el patrón exacto de llamada al endpoint correspondiente.
 - El ejemplo de referencia en vivo para remote sensing es: `https://go-gisapi.go-aigua.com/examples/ex_remote_sensing/index.html`
+- El ejemplo de ground movement en vivo: `https://go-gisapi.go-aigua.com/examples/ex_ground_movement/index.html`
 - **Nunca inventes endpoints, parámetros de request/response ni rutas** que no estén en la documentación interna de gis-rs-service.
 
-### Módulos disponibles (rutas de endpoint)
+### Endpoints clave (todos bajo `/api/remote-sensing/`)
 
-Consulta siempre la documentación interna para los módulos:
-- `/agriculture/` — rs_rest_0 (descarga), rs_rest_1 (consulta), rs_rest_2 (imagen Azure), rs_rest_3 (histórico parcela), rs_rest_4 (geometrías)
-- `/ground_movement/` — descargas InSAR, alarmas, visualización
-- `/earth_pulse/` — Water Leak Detection, estadísticas de red
-- `/evapotranspiration/` — cálculo ET con pyet
+| Producto | Endpoints principales |
+|---|---|
+| Agriculture S2 | `get-client-data`, `get-image`, `get-image-data`, `get-plot-historic-data`, `get-client-geometries` |
+| Ground Movement S1 | `ground-movement-create-client`, `ground-movement-demand`, `ground-movement-process`, `ground-movement-stats`, `get-gm-range-stats`, `gm-network-health-dashboard`, `gm-network-health-critical-pipes`, `get-client-geometries-gm` |
+| EarthPulse / Water Leak | `new-client-earth-pulse`, `download-soil-moisture`, `water-leak-data-range`, `get-image-water-leak`, `pipes-stats-earthpulse-date`, `difference-pipes-stats-earthpulse`, `network-health-dashboard`, `network-health-critical-pipes`, `wl-network-health-dashboard`, `wl-network-health-critical-pipes`, `add-leak-report` |
+| Diagnóstico | `service-diagnostic` — llamar siempre ante errores de conexión/configuración |
+
+### Integración con go-gis — Regla de oro
+
+Toda llamada a gis-rs-service desde el frontend **siempre** resulta en una o varias capas en go-gis:
+
+| Dato gis-rs-service | Capa go-gis | Endpoint RS que lo genera |
+|---|---|---|
+| Imagen raster S2 (Azure Blob, base64) | `GO_REMOTE_SENSING` con `remoteSensingType` S2 | `get-image`, `get-image-data` |
+| GeoTIFF desplazamiento S1 (MinIO) | `GO_REMOTE_SENSING` con `remoteSensingType` S1 | `ground-movement-process` |
+| Imagen humedad suelo WL (MinIO) | `GO_REMOTE_SENSING` con `remoteSensingType` WL | `get-image-water-leak`, `get-image-difference-water-leak` |
+| GeoJSON tuberías críticas | `GO_GEOJSON_LAYER` o `GO_VECTOR_LAYER` | `gm-network-health-critical-pipes`, `wl-network-health-critical-pipes`, `difference-pipes-geojson-earthpulse` |
+| Geometrías cliente (parcelas/tuberías) | `GO_GEOJSON_LAYER` | `get-client-geometries`, `get-client-geometries-gm` |
+
+### Scheduler diario (automático, 00:00)
+
+| Job | Acción |
+|---|---|
+| `download_agriculture_images` | Descarga imágenes S2 todos los clientes |
+| `demand_ground_movement` | Solicita interferogramas S1 a HyP3/ASF |
+| `download_process_ground_movement` | Descarga + MintPy → GeoTIFF → MinIO |
+| `stats_ground_movement` | Calcula estadísticas de desplazamiento → BD |
+
+---
+
+## MATRIZ DE CORRELACIÓN ENTRE LOS TRES SERVICIOS
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                         FRONTEND (React)                             │
+│  go-gis (map-engine)                                                 │
+│  GoStore(token JWT) ──► Authorization: Bearer en cada request        │
+└────────────┬─────────────────────────────────────────────────────────┘
+             │ WFS/WMS (GO_VECTOR_LAYER / GO_WMS_LAYER)
+             │ GO_REMOTE_SENSING
+             │ GO_GEOJSON_LAYER
+             ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  gis-apirest  (datos vectoriales GeoServer)                             │
+│  KeycloakHTTPBearer → get_current_tenant() → tenant_id + roles          │
+│  GaPortal → gaportal_service_geoserver_credentials_call(tenant.api_key) │
+│             ↓                                                           │
+│         GeoServer WFS/WMS → go-gis consume como GO_VECTOR/WMS_LAYER    │
+└─────────────────────────────────────────────────────────────────────────┘
+             │ Misma autenticación Keycloak multi-tenant
+             ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  gis-rs-service (teledetección satelital)  puerto 1919                  │
+│  OAuth2 Keycloak → get_current_tenant_id(request) → TenancyDDBB         │
+│  Scheduler 00:00 → S2/S1 → Azure/MinIO → BD PostgreSQL+PostGIS          │
+│  Endpoints /api/remote-sensing/* → go-gis consume como:                 │
+│   · GO_REMOTE_SENSING   (imágenes raster S2/S1/WL)                      │
+│   · GO_GEOJSON_LAYER    (tuberías críticas, geometrías cliente)          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Reglas de integración entre servicios
+
+1. **go-gis → gis-apirest**: El token JWT almacenado en `GoStore` se envía como `Authorization: Bearer` a todos los endpoints de gis-apirest. gis-apirest identifica el tenant y devuelve datos de GeoServer propios de ese tenant. go-gis los muestra como `GO_VECTOR_LAYER` (WFS) o `GO_WMS_LAYER` (WMS).
+
+2. **go-gis → gis-rs-service**: Igual que con gis-apirest, el mismo token JWT. Los endpoints RS devuelven imágenes (S2/S1/WL) que siempre se montan como `GO_REMOTE_SENSING` en go-gis, y GeoJSONs de tuberías que se montan como `GO_GEOJSON_LAYER`.
+
+3. **gis-apirest ↔ gis-rs-service**: Comparten la misma arquitectura multi-tenant Keycloak. Al crear un nuevo cliente RS, gis-rs-service llama a un WFS de GeoServer (la misma capa que gis-apirest serviría como `GO_VECTOR_LAYER`) para obtener las geometrías iniciales.
+
+4. **Patrón de alta de cliente RS from go-gis**:
+   - El usuario selecciona una capa WFS existente en go-gis (`GO_VECTOR_LAYER`)
+   - La URL de esa capa WFS y su `layerName` se pasan al endpoint `create-new-client-s2` o `ground-movement-create-client` de gis-rs-service
+   - gis-rs-service crea las tablas en BD y carga las geometrías desde ese WFS
+   - El ID del cliente queda registrado para los jobs del scheduler
+
+5. **Diagnóstico ante errores**: antes de escalar cualquier error de gis-rs-service, llamar siempre a `POST /api/remote-sensing/service-diagnostic` para verificar las variables de entorno críticas.
 
 ---
 
